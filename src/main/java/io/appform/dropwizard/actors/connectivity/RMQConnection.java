@@ -29,6 +29,7 @@ import com.rabbitmq.client.ConnectionFactory;
 import com.rabbitmq.client.impl.StandardMetricsCollector;
 import io.appform.dropwizard.actors.TtlConfig;
 import io.appform.dropwizard.actors.actor.ActorConfig;
+import io.appform.dropwizard.actors.base.ConnectionMeta;
 import io.appform.dropwizard.actors.base.utils.NamingUtils;
 import io.appform.dropwizard.actors.config.RMQConfig;
 import io.dropwizard.lifecycle.Managed;
@@ -57,6 +58,8 @@ public class RMQConnection implements Managed {
     private final Environment environment;
     private TtlConfig ttlConfig;
 
+    @Getter
+    private ConnectionMeta<String> connectionMeta;
 
     public RMQConnection(final String name,
                          final RMQConfig config,
@@ -68,8 +71,8 @@ public class RMQConnection implements Managed {
         this.executorService = executorService;
         this.environment = environment;
         this.ttlConfig = ttlConfig;
+        this.connectionMeta = new ConnectionMeta<>();
     }
-
 
     @Override
     public void start() throws Exception {
