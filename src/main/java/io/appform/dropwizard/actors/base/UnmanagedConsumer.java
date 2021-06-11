@@ -76,8 +76,7 @@ public class UnmanagedConsumer<Message> {
             try {
                 final Channel channel = handler.getChannel();
                 channel.basicCancel(handler.getTag());
-                channel.close();
-                log.info("Consumer channel {} closed.", name);
+                log.info("Consumer channel {} cancelled.", name);
             } catch (Exception e) {
                 log.error(String.format("Error cancelling consumer: %s", handler.getTag()), e);
             }

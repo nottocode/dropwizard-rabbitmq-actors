@@ -14,6 +14,7 @@ import lombok.val;
 
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.function.BiConsumer;
 
 @Slf4j
@@ -79,18 +80,22 @@ public class ConnectionRegistry implements Managed {
     }
 
     @Override
-    public void start() throws Exception {
+    public void start() {
 
     }
 
     @Override
     public void stop() throws Exception {
+        final CountDownLatch countDownLatch = new CountDownLatch(connections.size());
+
         connections.forEach(new BiConsumer<String, RMQConnection>() {
             @SneakyThrows
             @Override
             public void accept(String name, RMQConnection rmqConnection) {
-                rmqConnection.stop();
+                rmqConnection.stop(countDownLatch);
             }
         });
+
+        countDownLatch.await();
     }
 }

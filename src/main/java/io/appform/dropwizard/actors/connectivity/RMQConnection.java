@@ -36,6 +36,8 @@ import io.appform.dropwizard.actors.actor.ActorConfig;
 import io.appform.dropwizard.actors.base.ConnectionMeta;
 import io.appform.dropwizard.actors.base.utils.ConsumerMeta;
 import io.appform.dropwizard.actors.base.utils.NamingUtils;
+import io.appform.dropwizard.actors.common.ErrorCode;
+import io.appform.dropwizard.actors.common.RabbitmqActorException;
 import io.appform.dropwizard.actors.config.RMQConfig;
 import io.dropwizard.lifecycle.Managed;
 import io.dropwizard.setup.Environment;
@@ -50,6 +52,7 @@ import java.io.IOException;
 import java.security.KeyStore;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 
@@ -68,7 +71,7 @@ public class RMQConnection implements Managed {
     private ConnectionMeta<String> connectionMeta;
 
     private static final Retryer<Boolean> retryer = RetryerBuilder.<Boolean>newBuilder()
-            .retryIfResult(aBoolean -> false)
+            .retryIfExceptionOfType(RabbitmqActorException.class)
             .withStopStrategy(StopStrategies.stopAfterAttempt(3))
             .withWaitStrategy(WaitStrategies.fixedWait(3, TimeUnit.SECONDS))
             .build();
@@ -208,11 +211,7 @@ public class RMQConnection implements Managed {
     }
 
     @Override
-    public void stop() throws Exception {
-        if (null != channel && channel.isOpen()) {
-            channel.close();
-        }
-        closeConnection();
+    public void stop() {
     }
 
     public Channel channel() {
@@ -242,23 +241,44 @@ public class RMQConnection implements Managed {
         return ttlOpts;
     }
 
-    private boolean closeConnection() throws Exception {
-        return retryer.call(() -> {
-            final long totalConsumersWithActiveMessagesPerConnection = connectionMeta.getConsumerMeta().values().stream()
-                    .map(consumerMetas -> consumerMetas.stream()
-                            .map(ConsumerMeta::getActiveMessagesCount)
-                            .filter(count -> count > 0)
-                            .count())
-                    .count();
-            if (totalConsumersWithActiveMessagesPerConnection > 0) {
-                return false;
-            }
+    public void stop(final CountDownLatch countDownLatch) throws Exception {
+        if (null != channel && channel.isOpen()) {
+            channel.close();
+        }
 
-            if (null != connection && connection.isOpen()) {
-                connection.close();
-            }
-            return true;
-        });
+        new Thread(() -> this.closeConnection(countDownLatch)).start();
     }
 
+    private void closeConnection(final CountDownLatch countDownLatch) {
+        try {
+            retryer.call(() -> {
+                final long totalConsumersWithActiveMessagesPerConnection = connectionMeta.getConsumerMeta().values().stream()
+                        .map(consumerMetas -> consumerMetas.stream()
+                                .map(ConsumerMeta::getActiveMessagesCount)
+                                .filter(count -> count > 0)
+                                .count())
+                        .reduce(0L, Long::sum);
+
+                if (totalConsumersWithActiveMessagesPerConnection > 0) {
+                    log.info("Number of consumers with activeMessage: {} for connection: {}",
+                            totalConsumersWithActiveMessagesPerConnection, name);
+
+                    log.error("Throwing exception, will try closing connection {} again in sometime.", name);
+                    throw RabbitmqActorException.builder()
+                            .errorCode(ErrorCode.CONNECTION_SHUTDOWN_ERROR)
+                            .message("Error in closing connection.")
+                            .build();
+                }
+
+                if (null != connection && connection.isOpen()) {
+                    log.info("Closing connection: {}", name);
+                    connection.close();
+                }
+                countDownLatch.countDown();
+                return true;
+            });
+        } catch (Exception e) {
+            log.error("Exception while closing connection {}", name);
+        }
+    }
 }
