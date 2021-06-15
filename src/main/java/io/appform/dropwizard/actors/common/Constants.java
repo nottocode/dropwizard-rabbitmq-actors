@@ -12,4 +12,6 @@ public class Constants {
 
     public static final int MAX_THREADS_PER_CONNECTION = 300;
 
+    public static final int DEFAULT_CONNECTIONS_PER_CLIENT = 10;
+
 }

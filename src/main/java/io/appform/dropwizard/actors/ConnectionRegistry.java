@@ -8,14 +8,15 @@ import io.appform.dropwizard.actors.connectivity.RMQConnection;
 import io.dropwizard.lifecycle.Managed;
 import io.dropwizard.setup.Environment;
 import lombok.Data;
-import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import lombok.val;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.function.BiConsumer;
+import java.util.concurrent.ExecutorService;
 
 @Slf4j
 @Data
@@ -86,16 +87,15 @@ public class ConnectionRegistry implements Managed {
 
     @Override
     public void stop() throws Exception {
-        final CountDownLatch countDownLatch = new CountDownLatch(connections.size());
+        final ExecutorService shutDownExecutorService = executorServiceProvider.newFixedThreadPool("rmqconnection-shutdown",
+                Constants.DEFAULT_CONNECTIONS_PER_CLIENT);
+        final List<Callable<Boolean>> shutDownRoutines = new ArrayList<>();
 
-        connections.forEach(new BiConsumer<String, RMQConnection>() {
-            @SneakyThrows
-            @Override
-            public void accept(String name, RMQConnection rmqConnection) {
-                rmqConnection.stop(countDownLatch);
-            }
-        });
+        connections.forEach((name, rmqConnection) -> shutDownRoutines.add(rmqConnection.connectionShutdownRoutine()));
 
-        countDownLatch.await();
+        shutDownExecutorService.invokeAll(shutDownRoutines);
+        shutDownExecutorService.shutdown();
+
+        log.info("Attempt to close all connections are done.");
     }
 }

@@ -52,7 +52,7 @@ import java.io.IOException;
 import java.security.KeyStore;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 
@@ -66,6 +66,7 @@ public class RMQConnection implements Managed {
     private final ExecutorService executorService;
     private final Environment environment;
     private TtlConfig ttlConfig;
+    private ConnectionShutdownRoutine connectionShutdownRoutine;
 
     @Getter
     private ConnectionMeta<String> connectionMeta;
@@ -188,7 +189,7 @@ public class RMQConnection implements Managed {
     public HealthCheck healthcheck() {
         return new HealthCheck() {
             @Override
-            protected Result check() throws Exception {
+            protected Result check() {
                 if (connection == null) {
                     log.warn("RMQ Healthcheck::No RMQ connection available");
                     return Result.unhealthy("No RMQ connection available");
@@ -241,44 +242,49 @@ public class RMQConnection implements Managed {
         return ttlOpts;
     }
 
-    public void stop(final CountDownLatch countDownLatch) throws Exception {
-        if (null != channel && channel.isOpen()) {
-            channel.close();
+    public ConnectionShutdownRoutine connectionShutdownRoutine() {
+        if (this.connectionShutdownRoutine != null) {
+            return this.connectionShutdownRoutine;
         }
 
-        new Thread(() -> this.closeConnection(countDownLatch)).start();
+        this.connectionShutdownRoutine = new ConnectionShutdownRoutine();
+        return this.connectionShutdownRoutine;
     }
 
-    private void closeConnection(final CountDownLatch countDownLatch) {
-        try {
-            retryer.call(() -> {
-                final long totalConsumersWithActiveMessagesPerConnection = connectionMeta.getConsumerMeta().values().stream()
-                        .map(consumerMetas -> consumerMetas.stream()
-                                .map(ConsumerMeta::getActiveMessagesCount)
-                                .filter(count -> count > 0)
-                                .count())
-                        .reduce(0L, Long::sum);
+    private class ConnectionShutdownRoutine implements Callable<Boolean> {
 
-                if (totalConsumersWithActiveMessagesPerConnection > 0) {
-                    log.info("Number of consumers with activeMessage: {} for connection: {}",
-                            totalConsumersWithActiveMessagesPerConnection, name);
+        @Override
+        public Boolean call() {
+            try {
+                retryer.call(() -> {
+                    final long totalConsumersWithActiveMessagesPerConnection = connectionMeta.getConsumerMeta().values().stream()
+                            .map(consumerMetas -> consumerMetas.stream()
+                                    .map(ConsumerMeta::getActiveMessagesCount)
+                                    .filter(count -> count > 0)
+                                    .count())
+                            .reduce(0L, Long::sum);
 
-                    log.error("Throwing exception, will try closing connection {} again in sometime.", name);
-                    throw RabbitmqActorException.builder()
-                            .errorCode(ErrorCode.CONNECTION_SHUTDOWN_ERROR)
-                            .message("Error in closing connection.")
-                            .build();
-                }
+                    if (totalConsumersWithActiveMessagesPerConnection > 0) {
+                        log.info("Number of consumers with activeMessage: {} for connection: {}",
+                                totalConsumersWithActiveMessagesPerConnection, name);
 
-                if (null != connection && connection.isOpen()) {
-                    log.info("Closing connection: {}", name);
-                    connection.close();
-                }
-                countDownLatch.countDown();
-                return true;
-            });
-        } catch (Exception e) {
-            log.error("Exception while closing connection {}", name);
+                        log.error("Throwing exception, will try closing connection {} again in sometime.", name);
+                        throw RabbitmqActorException.builder()
+                                .errorCode(ErrorCode.CONNECTION_SHUTDOWN_ERROR)
+                                .message("Error in closing connection.")
+                                .build();
+                    }
+
+                    if (null != connection && connection.isOpen()) {
+                        log.info("Closing connection: {}", name);
+                        connection.close();
+                    }
+                    return true;
+                });
+            } catch (Exception e) {
+                log.error("Exception while closing connection: {}", name);
+            }
+            return true;
         }
     }
 }
