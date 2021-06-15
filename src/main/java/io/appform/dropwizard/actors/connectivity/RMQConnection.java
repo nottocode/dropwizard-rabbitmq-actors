@@ -275,6 +275,10 @@ public class RMQConnection implements Managed {
                                 .build();
                     }
 
+                    if (null != channel && channel.isOpen()) {
+                        channel.close();
+                    }
+
                     if (null != connection && connection.isOpen()) {
                         log.info("Closing connection: {}", name);
                         connection.close();
