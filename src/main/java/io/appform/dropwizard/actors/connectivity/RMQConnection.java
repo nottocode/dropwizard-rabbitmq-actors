@@ -18,6 +18,10 @@
 package io.appform.dropwizard.actors.connectivity;
 
 import com.codahale.metrics.health.HealthCheck;
+import com.github.rholder.retry.Retryer;
+import com.github.rholder.retry.RetryerBuilder;
+import com.github.rholder.retry.StopStrategies;
+import com.github.rholder.retry.WaitStrategies;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableMap;
@@ -29,7 +33,11 @@ import com.rabbitmq.client.ConnectionFactory;
 import com.rabbitmq.client.impl.StandardMetricsCollector;
 import io.appform.dropwizard.actors.TtlConfig;
 import io.appform.dropwizard.actors.actor.ActorConfig;
+import io.appform.dropwizard.actors.base.ConnectionMeta;
+import io.appform.dropwizard.actors.base.utils.ConsumerMeta;
 import io.appform.dropwizard.actors.base.utils.NamingUtils;
+import io.appform.dropwizard.actors.common.ErrorCode;
+import io.appform.dropwizard.actors.common.RabbitmqActorException;
 import io.appform.dropwizard.actors.config.RMQConfig;
 import io.dropwizard.lifecycle.Managed;
 import io.dropwizard.setup.Environment;
@@ -44,7 +52,9 @@ import java.io.IOException;
 import java.security.KeyStore;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.UUID;
 
 @Slf4j
@@ -57,7 +67,16 @@ public class RMQConnection implements Managed {
     private final ExecutorService executorService;
     private final Environment environment;
     private TtlConfig ttlConfig;
+    private ConnectionShutdownRoutine connectionShutdownRoutine;
 
+    @Getter
+    private ConnectionMeta<String> connectionMeta;
+
+    private static final Retryer<Boolean> retryer = RetryerBuilder.<Boolean>newBuilder()
+            .retryIfExceptionOfType(RabbitmqActorException.class)
+            .withStopStrategy(StopStrategies.stopAfterAttempt(3))
+            .withWaitStrategy(WaitStrategies.fixedWait(3, TimeUnit.SECONDS))
+            .build();
 
     public RMQConnection(final String name,
                          final RMQConfig config,
@@ -69,8 +88,8 @@ public class RMQConnection implements Managed {
         this.executorService = executorService;
         this.environment = environment;
         this.ttlConfig = ttlConfig;
+        this.connectionMeta = new ConnectionMeta<>();
     }
-
 
     @Override
     public void start() throws Exception {
@@ -171,7 +190,7 @@ public class RMQConnection implements Managed {
     public HealthCheck healthcheck() {
         return new HealthCheck() {
             @Override
-            protected Result check() throws Exception {
+            protected Result check() {
                 if (connection == null) {
                     log.warn("RMQ Healthcheck::No RMQ connection available");
                     return Result.unhealthy("No RMQ connection available");
@@ -194,13 +213,7 @@ public class RMQConnection implements Managed {
     }
 
     @Override
-    public void stop() throws Exception {
-        if (null != channel && channel.isOpen()) {
-            channel.close();
-        }
-        if (null != connection && connection.isOpen()) {
-            connection.close();
-        }
+    public void stop() {
     }
 
     public Channel channel() {
@@ -228,5 +241,55 @@ public class RMQConnection implements Managed {
             ttlOpts.put("x-expires", ttlConfig.getTtl().getSeconds() * 1000);
         }
         return ttlOpts;
+    }
+
+    public ConnectionShutdownRoutine connectionShutdownRoutine() {
+        if (this.connectionShutdownRoutine != null) {
+            return this.connectionShutdownRoutine;
+        }
+
+        this.connectionShutdownRoutine = new ConnectionShutdownRoutine();
+        return this.connectionShutdownRoutine;
+    }
+
+    private class ConnectionShutdownRoutine implements Callable<Boolean> {
+
+        @Override
+        public Boolean call() {
+            try {
+                retryer.call(() -> {
+                    final long totalConsumersWithActiveMessagesPerConnection = connectionMeta.getConsumerMeta().values().stream()
+                            .map(consumerMetas -> consumerMetas.stream()
+                                    .map(ConsumerMeta::getActiveMessagesCount)
+                                    .filter(count -> count > 0)
+                                    .count())
+                            .reduce(0L, Long::sum);
+
+                    if (totalConsumersWithActiveMessagesPerConnection > 0) {
+                        log.info("Number of consumers with activeMessage: {} for connection: {}",
+                                totalConsumersWithActiveMessagesPerConnection, name);
+
+                        log.error("Throwing exception, will try closing connection {} again in sometime.", name);
+                        throw RabbitmqActorException.builder()
+                                .errorCode(ErrorCode.CONNECTION_SHUTDOWN_ERROR)
+                                .message("Error in closing connection.")
+                                .build();
+                    }
+
+                    if (null != channel && channel.isOpen()) {
+                        channel.close();
+                    }
+
+                    if (null != connection && connection.isOpen()) {
+                        log.info("Closing connection: {}", name);
+                        connection.close();
+                    }
+                    return true;
+                });
+            } catch (Exception e) {
+                log.error("Exception while closing connection: {}", name);
+            }
+            return true;
+        }
     }
 }
