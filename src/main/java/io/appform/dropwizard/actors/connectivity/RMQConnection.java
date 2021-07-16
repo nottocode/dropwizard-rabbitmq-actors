@@ -55,6 +55,7 @@ import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.UUID;
 
 @Slf4j
 public class RMQConnection implements Managed {
@@ -143,7 +144,7 @@ public class RMQConnection implements Managed {
             }
         });
         channel = connection.createChannel();
-        environment.healthChecks().register(String.format("rmqconnection-%s", connection), healthcheck());
+        environment.healthChecks().register(String.format("rmqconnection-%s-%s", connection, UUID.randomUUID().toString()), healthcheck());
         log.info(String.format("Started RMQ connection [%s] ", name));
     }
 
